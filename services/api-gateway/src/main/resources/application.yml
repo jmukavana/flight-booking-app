@@ -1,0 +1,100 @@
+spring:
+  application:
+    name: api-gateway
+  threads:
+    virtual:
+      enabled: true
+  data:
+    redis:
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+  security:
+    oauth2:
+      client:
+        registration:
+          keycloak:
+            provider: keycloak
+            client-id: resilire-gateway
+            client-secret: resilire-gateway-secret
+            authorization-grant-type: authorization_code
+            scope: openid,profile,email
+            redirect-uri: "{baseUrl}/login/oauth2/code/keycloak"
+        provider:
+          keycloak:
+            issuer-uri: ${KEYCLOAK_ISSUER_URI:http://localhost:8085/realms/resilire}
+            user-name-attribute: preferred_username
+  cloud:
+    gateway:
+      server:
+        webflux:
+          # TokenRelay forwards the logged-in user's access token to downstream
+          # services as a Bearer header; they validate it as resource servers.
+          default-filters:
+            - TokenRelay=
+            - name: RequestRateLimiter
+              args:
+                redis-rate-limiter.replenishRate: 20
+                redis-rate-limiter.burstCapacity: 30
+                redis-rate-limiter.requestedTokens: 1
+                key-resolver: "#{@principalKeyResolver}"
+          routes:
+            - id: identity
+              uri: ${IDENTITY_URI:http://localhost:9001}
+              predicates: [ "Path=/api/identity/**" ]
+              filters: [ "StripPrefix=2" ]
+            - id: booking
+              uri: ${BOOKING_URI:http://localhost:9002}
+              predicates: [ "Path=/api/booking/**" ]
+              filters: [ "StripPrefix=2" ]
+            - id: score
+              uri: ${SCORE_URI:http://localhost:9003}
+              predicates: [ "Path=/api/score/**" ]
+              filters: [ "StripPrefix=2" ]
+            - id: recovery
+              uri: ${RECOVERY_URI:http://localhost:9006}
+              predicates: [ "Path=/api/recovery/**" ]
+              filters: [ "StripPrefix=2" ]
+            - id: rights
+              uri: ${RIGHTS_URI:http://localhost:9007}
+              predicates: [ "Path=/api/rights/**" ]
+              filters: [ "StripPrefix=2" ]
+            - id: itinerary
+              uri: ${ITINERARY_URI:http://localhost:9008}
+              predicates: [ "Path=/api/itinerary/**" ]
+              filters: [ "StripPrefix=2" ]
+            - id: partner
+              uri: ${PARTNER_URI:http://localhost:9011}
+              predicates: [ "Path=/api/partner/**" ]
+              filters: [ "StripPrefix=2" ]
+            - id: payments
+              uri: ${PAYMENTS_URI:http://localhost:9009}
+              predicates: [ "Path=/api/payments/**" ]
+              filters: [ "StripPrefix=2" ]
+            - id: disruption
+              uri: ${DISRUPTION_URI:http://localhost:9005}
+              predicates: [ "Path=/api/disruption/**" ]
+              filters: [ "StripPrefix=2" ]
+            - id: notifications
+              uri: ${NOTIFICATIONS_URI:http://localhost:9010}
+              predicates: [ "Path=/api/notifications/**" ]
+              filters: [ "StripPrefix=2" ]
+server:
+  port: 8080
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  tracing:
+    sampling:
+      probability: 1.0
+  zipkin:
+    tracing:
+      endpoint: ${MANAGEMENT_ZIPKIN_TRACING_ENDPOINT:http://localhost:9411/api/v2/spans}

@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: identity-consent-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: identity-consent-service
+  template:
+    metadata:
+      labels:
+        app: identity-consent-service
+    spec:
+      serviceAccountName: identity-consent-service-ksa
+      containers:
+      - name: identity-consent-service
+        image: europe-west1-docker.pkg.dev/your-gcp-project-id/resilire-repo/identity-consent-service:latest
+        ports:
+        - containerPort: 9001
+        env:
+        - name: SPRING_PROFILES_ACTIVE
+          value: "prod"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: identity-consent-service
+spec:
+  type: ClusterIP
+  selector:
+    app: identity-consent-service
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 9001

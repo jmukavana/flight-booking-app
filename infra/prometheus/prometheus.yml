@@ -1,0 +1,66 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    environment: local
+
+scrape_configs:
+  - job_name: api-gateway
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["api-gateway:8080"]
+
+  - job_name: identity-consent-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["identity-consent-service:9001"]
+
+  - job_name: booking-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["booking-service:9002"]
+
+  - job_name: resilience-score-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["resilience-score-service:9003"]
+
+  - job_name: ingestion-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["ingestion-service:9004"]
+
+  - job_name: disruption-detection-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["disruption-detection-service:9005"]
+
+  - job_name: recovery-orchestrator-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["recovery-orchestrator-service:9006"]
+
+  - job_name: rights-claims-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["rights-claims-service:9007"]
+
+  - job_name: itinerary-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["itinerary-service:9008"]
+
+  - job_name: payments-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["payments-service:9009"]
+
+  - job_name: notification-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["notification-service:9010"]
+
+  - job_name: partner-service
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets: ["partner-service:9011"]

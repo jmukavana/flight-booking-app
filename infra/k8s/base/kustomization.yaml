@@ -1,0 +1,5 @@
+resources:
+  - api-gateway.yaml
+  - booking-service.yaml
+  - identity-consent-service.yaml
+  # We would add the rest of the services here in a complete setup.

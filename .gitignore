@@ -1,0 +1,10 @@
+.idea/
+.claude/settings.local.json
+.gradle/
+target/
+build/
+node_modules/
+.env
+.env.*
+!.env.example
+*.log

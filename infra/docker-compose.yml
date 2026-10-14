@@ -1,0 +1,490 @@
+# Resilire — local development stack (Phase 12: full observability added).
+# Scope: all backing services + all 12 Spring Boot services + Prometheus/Grafana/Jaeger.
+# NOT production infra (prod = EKS multi-region, see infra/terraform/README.md).
+#
+# Usage:
+#   Build images first (first time or after code changes):
+#     docker compose build
+#   Start everything:
+#     docker compose up -d
+#   Tail a specific service:
+#     docker compose logs -f booking-service
+#
+# Optional env vars (set in shell or .env file at repo root):
+#   RESILIRE_MAIL_PASSWORD  — SMTP password for notification-service (default: empty)
+#   ML_SERVING_URI          — ML model server for resilience-score-service (default: host.docker.internal:8000)
+#
+# Observability endpoints (local dev):
+#   Prometheus  http://localhost:9090
+#   Grafana     http://localhost:3000  (anonymous viewer access, no login)
+#   Jaeger UI   http://localhost:16686
+
+name: resilire-dev
+
+x-restart: &restart
+  restart: unless-stopped
+
+# Standard healthcheck for all Spring Boot actuator services.
+# start_period gives Flyway + JPA init time to complete before Docker starts counting retries.
+x-svc-hc: &svc-hc
+  interval: 15s
+  timeout: 5s
+  retries: 10
+  start_period: 90s
+
+# Common env shared by every service that connects to Kafka.
+x-kafka-env: &kafka-env
+  SPRING_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+
+# Common env for services with a Postgres datasource.
+x-db-env: &db-env
+  SPRING_DATASOURCE_USERNAME: resilire
+  SPRING_DATASOURCE_PASSWORD: resilire
+
+# Common env for JWT resource servers (all services except ingestion-service).
+x-oauth2-env: &oauth2-env
+  SPRING_SECURITY_OAUTH2_RESOURCESERVER_JWT_ISSUER_URI: http://keycloak:8080/realms/resilire
+
+# Distributed tracing — Brave → Zipkin protocol → Jaeger collector.
+x-tracing-env: &tracing-env
+  MANAGEMENT_TRACING_SAMPLING_PROBABILITY: "1.0"
+  MANAGEMENT_ZIPKIN_TRACING_ENDPOINT: http://jaeger:9411/api/v2/spans
+
+networks:
+  resilire-net:
+    driver: bridge
+
+volumes:
+  pgdata:
+  kafkadata:
+
+services:
+  # ────────────────────────────────────────────────────────────────────────────
+  # Backing services
+  # ────────────────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:17
+    <<: *restart
+    environment:
+      POSTGRES_USER: resilire
+      POSTGRES_PASSWORD: resilire
+      POSTGRES_DB: postgres
+    ports: ["5433:5432"]   # host 5433 avoids clashing with a local Postgres on 5432
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./postgres/init:/docker-entrypoint-initdb.d:ro
+    networks: [resilire-net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U resilire"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7.4-alpine
+    <<: *restart
+    command: ["redis-server", "--appendonly", "yes"]
+    ports: ["6379:6379"]
+    networks: [resilire-net]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  kafka:
+    image: apache/kafka:3.9.0           # KRaft mode — no ZooKeeper
+    <<: *restart
+    ports: ["9092:9092"]
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: CONTROLLER://:9093,INTERNAL://:29092,EXTERNAL://:9092
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:29092,EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1   # transactional outbox (ADR-10)
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"            # topics created by kafka-init
+      CLUSTER_ID: resilire-local-cluster01
+    volumes:
+      - kafkadata:/var/lib/kafka/data
+    networks: [resilire-net]
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+
+  kafka-init:
+    image: apache/kafka:3.9.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    entrypoint: ["/bin/bash", "/scripts/create-topics.sh"]
+    environment:
+      BOOTSTRAP: kafka:29092
+    volumes:
+      - ./kafka:/scripts:ro
+    networks: [resilire-net]
+    restart: "no"
+
+  schema-registry:
+    image: apicurio/apicurio-registry-mem:2.6.5.Final     # Apache-2.0, vendor-neutral
+    <<: *restart
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports: ["8081:8080"]
+    networks: [resilire-net]
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    <<: *restart
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+    ports: ["8085:8080"]
+    volumes:
+      - ./keycloak:/opt/keycloak/data/import:ro
+    networks: [resilire-net]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/health/ready | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+
+  kafka-ui:
+    image: kafbat/kafka-ui:latest                          # dev-only convenience
+    <<: *restart
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_CLUSTERS_0_NAME: resilire-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      DYNAMIC_CONFIG_ENABLED: "true"
+    ports: ["8088:8080"]
+    networks: [resilire-net]
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Spring Boot services
+  # ────────────────────────────────────────────────────────────────────────────
+
+  identity-consent-service:
+    <<: *restart
+    build:
+      context: ../services/identity-consent-service
+    ports: ["9001:9001"]
+    environment:
+      <<: [*kafka-env, *db-env, *oauth2-env, *tracing-env]
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/identity
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks: [resilire-net]
+    healthcheck:
+      <<: *svc-hc
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9001/actuator/health | grep -q UP"]
+
+  booking-service:
+    <<: *restart
+    build:
+      context: ../services/booking-service
+    ports: ["9002:9002"]
+    environment:
+      <<: [*kafka-env, *db-env, *oauth2-env, *tracing-env]
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/booking
+      RESILIRE_PAYMENTS_BASE_URL: http://payments-service:9009
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      payments-service:
+        condition: service_healthy
+    networks: [resilire-net]
+    healthcheck:
+      <<: *svc-hc
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9002/actuator/health | grep -q UP"]
+
+  resilience-score-service:
+    <<: *restart
+    build:
+      context: ../services/resilience-score-service
+    ports: ["9003:9003"]
+    environment:
+      <<: [*kafka-env, *oauth2-env, *tracing-env]
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      # ML-serving is optional; service degrades gracefully when unavailable.
+      # Point to host machine via host.docker.internal if running locally.
+      RESILIRE_ML_SERVING_BASE_URL: ${ML_SERVING_URI:-http://host.docker.internal:8000}
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks: [resilire-net]
+    healthcheck:
+      <<: *svc-hc
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9003/actuator/health | grep -q UP"]
+
+  ingestion-service:
+    <<: *restart
+    build:
+      context: ../services/ingestion-service
+    ports: ["9004:9004"]
+    environment:
+      <<: [*kafka-env, *tracing-env]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    networks: [resilire-net]
+    healthcheck:
+      <<: *svc-hc
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9004/actuator/health | grep -q UP"]
+
+  disruption-detection-service:
+    <<: *restart
+    build:
+      context: ../services/disruption-detection-service
+    ports: ["9005:9005"]
+    environment:
+      <<: [*kafka-env, *db-env, *oauth2-env, *tracing-env]
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/disruption
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks: [resilire-net]
+    healthcheck:
+      <<: *svc-hc
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9005/actuator/health | grep -q UP"]
+
+  recovery-orchestrator-service:
+    <<: *restart
+    build:
+      context: ../services/recovery-orchestrator-service
+    ports: ["9006:9006"]
+    environment:
+      <<: [*kafka-env, *db-env, *oauth2-env, *tracing-env]
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/recovery
+      RESILIRE_RIGHTS_CLAIMS_BASE_URL: http://rights-claims-service:9007
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      rights-claims-service:
+        condition: service_healthy
+    networks: [resilire-net]
+    healthcheck:
+      <<: *svc-hc
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9006/actuator/health | grep -q UP"]
+
+  rights-claims-service:
+    <<: *restart
+    build:
+      context: ../services/rights-claims-service
+    ports: ["9007:9007"]
+    environment:
+      <<: [*kafka-env, *db-env, *oauth2-env, *tracing-env]
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/rights
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks: [resilire-net]
+    healthcheck:
+      <<: *svc-hc
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9007/actuator/health | grep -q UP"]
+
+  itinerary-service:
+    <<: *restart
+    build:
+      context: ../services/itinerary-service
+    ports: ["9008:9008"]
+    environment:
+      <<: [*kafka-env, *oauth2-env, *tracing-env]
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks: [resilire-net]
+    healthcheck:
+      <<: *svc-hc
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9008/actuator/health | grep -q UP"]
+
+  payments-service:
+    <<: *restart
+    build:
+      context: ../services/payments-service
+    ports: ["9009:9009"]
+    environment:
+      <<: [*kafka-env, *db-env, *oauth2-env, *tracing-env]
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/payments
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks: [resilire-net]
+    healthcheck:
+      <<: *svc-hc
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9009/actuator/health | grep -q UP"]
+
+  notification-service:
+    <<: *restart
+    build:
+      context: ../services/notification-service
+    ports: ["9010:9010"]
+    environment:
+      <<: [*kafka-env, *oauth2-env, *tracing-env]
+      RESILIRE_NOTIFICATION_EMAIL_PASSWORD: ${RESILIRE_MAIL_PASSWORD:-}
+    depends_on:
+      kafka:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks: [resilire-net]
+    healthcheck:
+      <<: *svc-hc
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9010/actuator/health | grep -q UP"]
+
+  partner-service:
+    <<: *restart
+    build:
+      context: ../services/partner-service
+    ports: ["9011:9011"]
+    environment:
+      <<: [*kafka-env, *db-env, *oauth2-env, *tracing-env]
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/partner
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks: [resilire-net]
+    healthcheck:
+      <<: *svc-hc
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9011/actuator/health | grep -q UP"]
+
+  api-gateway:
+    <<: *restart
+    build:
+      context: ../services/api-gateway
+    ports: ["8080:8080"]
+    environment:
+      <<: *tracing-env
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      KEYCLOAK_ISSUER_URI: http://keycloak:8080/realms/resilire
+      IDENTITY_URI: http://identity-consent-service:9001
+      BOOKING_URI: http://booking-service:9002
+      SCORE_URI: http://resilience-score-service:9003
+      DISRUPTION_URI: http://disruption-detection-service:9005
+      RECOVERY_URI: http://recovery-orchestrator-service:9006
+      RIGHTS_URI: http://rights-claims-service:9007
+      ITINERARY_URI: http://itinerary-service:9008
+      PAYMENTS_URI: http://payments-service:9009
+      NOTIFICATIONS_URI: http://notification-service:9010
+      PARTNER_URI: http://partner-service:9011
+    depends_on:
+      redis:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+    networks: [resilire-net]
+    healthcheck:
+      <<: *svc-hc
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health | grep -q UP"]
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Observability
+  # ────────────────────────────────────────────────────────────────────────────
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62
+    <<: *restart
+    environment:
+      COLLECTOR_ZIPKIN_HOST_PORT: 9411   # receives Brave/Zipkin spans from Spring Boot
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "9411:9411"     # Zipkin receiver (used by services via docker network too)
+    networks: [resilire-net]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:14269/health | grep -q healthy || wget -qO- http://localhost:14269/ >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    <<: *restart
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports: ["9090:9090"]
+    networks: [resilire-net]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy | grep -q Healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    <<: *restart
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/resilire-overview.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+    networks: [resilire-net]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3000/api/health | grep -q ok"]
+      interval: 10s
+      timeout: 5s
+      retries: 10

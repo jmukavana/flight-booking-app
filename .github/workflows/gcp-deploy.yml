@@ -1,0 +1,102 @@
+name: Build and Deploy to GCP
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  PROJECT_ID: your-gcp-project-id
+  GAR_LOCATION: europe-west1
+  GAR_REPOSITORY: resilire-repo
+  GKE_CLUSTER: resilire-gke-cluster
+  GKE_ZONE: europe-west1
+  WORKLOAD_IDENTITY_PROVIDER: projects/123456789/locations/global/workloadIdentityPools/github/providers/my-repo
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service:
+          - api-gateway
+          - booking-service
+          - identity-consent-service
+          - itinerary-service
+          - resilience-score-service
+          - notification-service
+          - payments-service
+          - ingestion-service
+          - disruption-detection-service
+          # - partner-service (not yet built in Phase 1)
+          # - recovery-orchestrator-service
+          # - rights-claims-service
+    
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up JDK 25
+      uses: actions/setup-java@v4
+      with:
+        java-version: '25'
+        distribution: 'temurin'
+        cache: maven
+
+    - name: Build with Maven
+      working-directory: ./services/${{ matrix.service }}
+      run: ./mvnw clean package -DskipTests
+
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+        service_account: github-actions@${{ env.PROJECT_ID }}.iam.gserviceaccount.com
+
+    - name: Set up Cloud SDK
+      uses: google-github-actions/setup-gcloud@v2
+
+    - name: Configure Docker to use Google Artifact Registry
+      run: |-
+        gcloud auth configure-docker ${{ env.GAR_LOCATION }}-docker.pkg.dev
+
+    - name: Build and Push Docker Image
+      working-directory: ./services/${{ matrix.service }}
+      run: |-
+        IMAGE_NAME="${{ env.GAR_LOCATION }}-docker.pkg.dev/${{ env.PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/${{ matrix.service }}:${{ github.sha }}"
+        docker build -t $IMAGE_NAME .
+        docker push $IMAGE_NAME
+
+  deploy-to-gke:
+    needs: build-and-publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Authenticate to Google Cloud
+      uses: google-github-actions/auth@v2
+      with:
+        workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+        service_account: github-actions@${{ env.PROJECT_ID }}.iam.gserviceaccount.com
+
+    - name: Set up GKE credentials
+      uses: google-github-actions/get-gke-credentials@v2
+      with:
+        cluster_name: ${{ env.GKE_CLUSTER }}
+        location: ${{ env.GKE_ZONE }}
+
+    - name: Deploy to GKE
+      run: |-
+        # Deploy using kubectl apply or kustomize
+        # Note: replace tags in k8s manifests with ${{ github.sha }}
+        kubectl apply -k infra/k8s/base/

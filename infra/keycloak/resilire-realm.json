@@ -1,0 +1,81 @@
+{
+  "realm": "resilire",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "roles": {
+    "realm": [
+      { "name": "traveller" },
+      { "name": "partner" },
+      { "name": "ops" },
+      { "name": "compliance" },
+      { "name": "admin" }
+    ]
+  },
+  "clients": [
+    {
+      "clientId": "resilire-gateway",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "secret": "resilire-gateway-secret",
+      "serviceAccountsEnabled": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "redirectUris": ["*"],
+      "webOrigins": ["*"]
+    },
+    {
+      "clientId": "resilire-app",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "redirectUris": ["*"],
+      "webOrigins": ["*"],
+      "attributes": { "pkce.code.challenge.method": "S256" }
+    }
+  ],
+  "users": [
+    {
+      "username": "traveller1",
+      "enabled": true,
+      "email": "traveller1@example.com",
+      "emailVerified": true,
+      "firstName": "Test",
+      "lastName": "Traveller",
+      "credentials": [ { "type": "password", "value": "password", "temporary": false } ],
+      "realmRoles": ["traveller"]
+    },
+    {
+      "username": "ops1",
+      "enabled": true,
+      "email": "ops1@example.com",
+      "emailVerified": true,
+      "firstName": "Test",
+      "lastName": "Ops",
+      "credentials": [ { "type": "password", "value": "password", "temporary": false } ],
+      "realmRoles": ["ops", "compliance"]
+    },
+    {
+      "username": "admin1",
+      "enabled": true,
+      "email": "admin1@example.com",
+      "emailVerified": true,
+      "firstName": "Test",
+      "lastName": "Admin",
+      "credentials": [ { "type": "password", "value": "password", "temporary": false } ],
+      "realmRoles": ["admin", "ops", "compliance"]
+    },
+    {
+      "username": "partner1",
+      "enabled": true,
+      "email": "partner1@example.com",
+      "emailVerified": true,
+      "firstName": "Test",
+      "lastName": "Partner",
+      "credentials": [ { "type": "password", "value": "password", "temporary": false } ],
+      "realmRoles": ["partner"]
+    }
+  ]
+}
